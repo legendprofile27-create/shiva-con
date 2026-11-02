@@ -1,0 +1,9 @@
+const express=require('express');
+const app=express();
+const PORT=process.env.PORT||10000;
+const DASHBOARD_URL=process.env.DASHBOARD_URL||'https://payment-approval-dashboard-legend-fd31.vercel.app';
+const startedAt=new Date().toISOString();
+app.get('/',(req,res)=>res.json({service:'payment-credit-worker',mode:'manual-submit',ok:true}));
+app.get('/health',(req,res)=>res.json({ok:true,mode:'manual-submit',startedAt,dashboard:DASHBOARD_URL}));
+app.get('/workflow',(req,res)=>res.json({steps:['Payment approved in dashboard','Duplicate UTR protection checked','Open authorized admin panel','Select mapped client','Enter amount and UTR remark','Human performs final Submit','Confirm Successful','Mark payment credited in dashboard'],finalSubmit:'human-required'}));
+app.listen(PORT,()=>console.log(`payment worker listening on ${PORT}`));
