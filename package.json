@@ -1,1 +1,1 @@
-{"name":"payment-credit-worker","version":"1.0.0","private":true,"type":"commonjs","scripts":{"start":"node server.js"},"dependencies":{"express":"5.1.0","tesseract.js":"7.0.0"}}
+{"name":"payment-credit-worker","version":"1.0.0","private":true,"type":"commonjs","scripts":{"start":"node server.js"},"dependencies":{"express":"5.1.0","qrcode":"1.5.4","tesseract.js":"7.0.0"}}
