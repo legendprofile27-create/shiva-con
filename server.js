@@ -16,11 +16,17 @@ const POLL_MS=Number(process.env.WHATSAPP_POLL_MS||8000);
 const startedAt=new Date().toISOString();
 let processor={running:false,lastPoll:null,lastInboxId:null,lastError:null};
 let ocrWorker=null;
-let activePhoneNumberId=process.env.WHATSAPP_PHONE_NUMBER_ID||'';
+let activePhoneNumberId='';
 
 async function rpc(name,body){
  const r=await fetch(`${SUPABASE_URL}/rest/v1/rpc/${name}`,{method:'POST',headers:{'Content-Type':'application/json',apikey:SUPABASE_ANON_KEY,Authorization:`Bearer ${SUPABASE_ANON_KEY}`},body:JSON.stringify(body)});
  const t=await r.text(); if(!r.ok) throw new Error(t||`RPC ${name} failed`); return t?JSON.parse(t):null;
+}
+async function loadSavedPhoneNumberId(){
+ try{const v=await rpc('whatsapp_get_phone_number_id',{p_api_key:INGEST_KEY});if(v)activePhoneNumberId=String(v);}catch(e){console.error('load phone number id failed',String(e.message||e));}
+}
+async function savePhoneNumberId(id){
+ const v=String(id||'').trim();if(!v)return;activePhoneNumberId=v;try{await rpc('whatsapp_set_phone_number_id',{p_api_key:INGEST_KEY,p_phone_number_id:v});}catch(e){console.error('save phone number id failed',String(e.message||e));}
 }
 function parseMoney(raw){const n=Number(String(raw||'').replace(/[,\s]/g,''));return Number.isFinite(n)&&n>0&&n<100000000?n:null;}
 function extractPayment(text){
@@ -47,7 +53,7 @@ async function processorLoop(){if(processor.running)return;processor.running=tru
 function normalizePhone(v){return String(v||'').replace(/[^0-9]/g,'');}
 function upiUri(upiId,payeeName,amount){const p=new URLSearchParams({pa:upiId,pn:payeeName||'Payment',am:Number(amount).toFixed(2),cu:'INR'});return `upi://pay?${p.toString()}`;}
 async function sendQrToWhatsApp({to,amount,upi_id,payee_name}){
- if(!ACCESS_TOKEN)throw new Error('WhatsApp access token missing'); if(!activePhoneNumberId)throw new Error('WhatsApp phone number ID not detected yet. Send one customer message first.');
+ if(!ACCESS_TOKEN)throw new Error('WhatsApp access token missing'); if(!activePhoneNumberId)throw new Error('Current WhatsApp phone number ID not learned yet. Send any message to the business number once, then retry.');
  const phone=normalizePhone(to);const amt=parseMoney(amount);const upi=String(upi_id||'').trim();if(!phone)throw new Error('Customer phone missing');if(!amt)throw new Error('Valid amount required');if(!upi||!upi.includes('@'))throw new Error('Valid UPI ID required');
  const uri=upiUri(upi,String(payee_name||'Payment').trim()||'Payment',amt);const png=await QRCode.toBuffer(uri,{type:'png',width:700,margin:2,errorCorrectionLevel:'M'});
  const form=new FormData();form.append('messaging_product','whatsapp');form.append('type','image/png');form.append('file',new Blob([png],{type:'image/png'}),'payment-qr.png');
@@ -64,6 +70,6 @@ app.get('/health',(req,res)=>res.json({ok:true,mode:'manual-submit+whatsapp-ocr'
 app.post('/whatsapp/send-qr',async(req,res)=>{try{if(!QR_SEND_KEY||req.get('x-qr-send-key')!==QR_SEND_KEY)return res.status(403).json({error:'forbidden'});const out=await sendQrToWhatsApp(req.body||{});res.json(out);}catch(e){res.status(400).json({error:String(e.message||e)});}});
 app.get('/workflow',(req,res)=>res.json({steps:['WhatsApp screenshot received','Message queued and deduplicated','WhatsApp profile name captured','OCR reads amount/UTR','Draft goes to dashboard review','Human verifies GPay and approves','Human submits admin deposit','Successful confirmed then Mark Credited'],finalSubmit:'human-required'}));
 app.get('/whatsapp/webhook',(req,res)=>{const mode=req.query['hub.mode'],token=req.query['hub.verify_token'],challenge=req.query['hub.challenge'];if(mode==='subscribe'&&VERIFY_TOKEN&&token===VERIFY_TOKEN)return res.status(200).send(challenge||'');return res.sendStatus(403);});
-app.post('/whatsapp/webhook',async(req,res)=>{res.sendStatus(200);try{const entries=Array.isArray(req.body?.entry)?req.body.entry:[];for(const entry of entries)for(const change of(entry.changes||[])){const value=change.value||{};if(value.metadata?.phone_number_id)activePhoneNumberId=String(value.metadata.phone_number_id);const contacts=Array.isArray(value.contacts)?value.contacts:[];const nameByPhone=new Map(contacts.map(c=>[String(c.wa_id||''),String(c.profile?.name||'').trim()]));for(const msg of(value.messages||[])){if(msg.type!=='image'||!msg.image?.id)continue;const senderPhone=String(msg.from||'');const senderName=nameByPhone.get(senderPhone)||null;await rpc('whatsapp_enqueue',{p_api_key:INGEST_KEY,p_message_id:String(msg.id),p_sender_phone:senderPhone,p_media_id:String(msg.image.id),p_mime_type:String(msg.image.mime_type||''),p_caption:msg.image.caption||null,p_sender_name:senderName});}}}catch(e){console.error('whatsapp webhook enqueue failed',String(e.message||e));}});
-app.listen(PORT,'0.0.0.0',()=>{console.log(`payment worker listening on ${PORT}`);processorLoop();});
+app.post('/whatsapp/webhook',async(req,res)=>{res.sendStatus(200);try{const entries=Array.isArray(req.body?.entry)?req.body.entry:[];for(const entry of entries)for(const change of(entry.changes||[])){const value=change.value||{};if(value.metadata?.phone_number_id)await savePhoneNumberId(value.metadata.phone_number_id);const contacts=Array.isArray(value.contacts)?value.contacts:[];const nameByPhone=new Map(contacts.map(c=>[String(c.wa_id||''),String(c.profile?.name||'').trim()]));for(const msg of(value.messages||[])){if(msg.type!=='image'||!msg.image?.id)continue;const senderPhone=String(msg.from||'');const senderName=nameByPhone.get(senderPhone)||null;await rpc('whatsapp_enqueue',{p_api_key:INGEST_KEY,p_message_id:String(msg.id),p_sender_phone:senderPhone,p_media_id:String(msg.image.id),p_mime_type:String(msg.image.mime_type||''),p_caption:msg.image.caption||null,p_sender_name:senderName});}}}catch(e){console.error('whatsapp webhook enqueue failed',String(e.message||e));}});
+app.listen(PORT,'0.0.0.0',async()=>{console.log(`payment worker listening on ${PORT}`);await loadSavedPhoneNumberId();processorLoop();});
 process.on('SIGTERM',async()=>{try{if(ocrWorker)await ocrWorker.terminate();}finally{process.exit(0)}});
